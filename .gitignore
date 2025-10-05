@@ -1,0 +1,22 @@
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pytest_cache/
+.venv/
+venv/
+.env
+
+# data / artifacts
+*.xlsx
+*.xls
+*.sql
+*.db
+*.sqlite*
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
