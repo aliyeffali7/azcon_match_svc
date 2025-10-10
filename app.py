@@ -286,10 +286,17 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
 from fastapi.responses import StreamingResponse, JSONResponse
 from typing import Optional, Dict, Any, List
 import os, io, base64, pandas as pd, requests
-
+from azcon_match.api import find_matches
+import json, urllib.parse
+from typing import Dict, Any
+from starlette.responses import Response
+import json, secrets
+import json, uuid, io
+from starlette.responses import Response
+# from azcon_match.matcher import find_matches
 from dotenv import load_dotenv
 load_dotenv()
-
+from azcon_match.output_v2 import build_output_df_v2, build_excel_bytes_v2
 from azcon_match import config as CFG
 def _override_cfg_from_env():
     import os
@@ -321,7 +328,8 @@ app = FastAPI(
     title="azcon_match microservice",
     docs_url="/docs",
     redoc_url="/redoc",
-    openapi_url="/openapi.json"
+    openapi_url="/openapi.json",
+    debug=True
 )
 
 # ---------- helpers ----------
@@ -340,7 +348,10 @@ def _auth(kind: str, prefix: str):
 
 def _auth_from_env(prefix: str):
     return _auth(_env(prefix + "AUTH_TYPE", "none"), prefix)
-
+# amount_col = _pick_col(
+#     df_in.columns,
+#     "amount","miqdar","say","qty","quantity","koliçestvo","количество","кол-во"
+# )
 def _pick_col(df_cols, *candidates):
     cols_lc = {str(c).lower().strip(): c for c in df_cols}
     for cand in candidates:
@@ -350,6 +361,7 @@ def _pick_col(df_cols, *candidates):
         if k in cols_lc:
             return cols_lc[k]
     return None
+
 
 def _normalize_query_df_to_cfg(df_in: pd.DataFrame) -> pd.DataFrame:
     """
@@ -417,6 +429,33 @@ def _post_result(excel_bytes: bytes, url: str, mode: str, headers: Dict[str,str]
         return f"ok:{r.status_code}"
     except requests.RequestException as e:
         return f"failed:{e}"
+    
+# --- find_matches üçün uyğunluq (compat) wrapper-i ---
+def _find_matches_compat(df_in, master_df, CFG):
+    """
+    Fərqli paket versiyalarında find_matches imzası dəyişə bilər.
+    Bu wrapper aşağıdakı ardıcıllıqla sınayır:
+      1) find_matches(df, master, cfg=CFG)     # səndə indi bu xəta verir
+      2) find_matches(df, master, config=CFG)  # bəzi versiyalarda 'config' adlanır
+      3) find_matches(df, master, CFG)         # yalnız mövqeli arqument kimi
+      4) find_matches(df, master)              # ümumiyyətlə configsiz
+    Hansı işləyirsə, onu qaytarır; heç biri işləməsə, TypeError-ı qaldırır.
+    """
+    try:
+        return find_matches(df_in, master_df, cfg=CFG)
+    except TypeError:
+        pass
+    try:
+        return find_matches(df_in, master_df, config=CFG)
+    except TypeError:
+        pass
+    try:
+        return find_matches(df_in, master_df, CFG)
+    except TypeError:
+        pass
+    # son şans: configsiz
+    return find_matches(df_in, master_df)
+
 
 # ---------- endpoints ----------
 @app.get("/health")
@@ -483,6 +522,217 @@ async def upload_estimate(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+@app.post("/estimates/upload_v2")
+async def upload_estimate_v2(
+    file: UploadFile = File(...),
+    strict: bool = Form(True),
+):
+    # 1) Faylı oxu (xlsx/csv)
+    content = await file.read()
+    fname = (file.filename or "").lower()
+    try:
+        if fname.endswith(".csv"):
+            df_in = pd.read_csv(io.BytesIO(content))
+        else:
+            df_in = pd.read_excel(io.BytesIO(content))
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error":"INPUT_READ_ERROR","detail":str(e)})
+
+    # 2) Sənin V1-dəki kimi normalize — text/flag/unit sütunlarını CFG adlarına gətir
+    #    (V1-də eyni funksiya istifadə olunur)
+    try:
+        qdf = _normalize_query_df_to_cfg(df_in)
+        # ---- AMOUNT autodetect (qdf və ya df_in-dən gətir) ----
+        amount_candidates = (
+            # düz yazımlar
+            "amount","miqdar","qty","quantity","adet","ədəd","adəd",
+            # az dilində variantlar
+            "miqdarı","sayı","say",
+            # rus/az kiril
+            "koliçestvo","количество","кол-во",
+            # tez-tez görülən typo-lar
+            "miqdər","miqdar1","miqdar_","miqdari","miqdar ", " miqdar",
+            "miqdarı ", " miqdarı", "miqdərı","miqdariy","miqdarr","migdar",
+        )
+
+        # 1) əvvəl qdf başlıqlarında axtar (normalize-dan sonra)
+        amount_col = _pick_col(qdf.columns, *amount_candidates)
+
+        # 2) tapılmadısa, orijinal df_in-dən götür və qdf-ə köçür
+        if not amount_col:
+            amount_col_in = _pick_col(df_in.columns, *amount_candidates)
+            if amount_col_in:
+                qdf["amount"] = df_in[amount_col_in].values
+                amount_col = "amount"
+        if amount_col:
+            qdf["amount"] = pd.to_numeric(
+                qdf[amount_col]
+                .astype(str)
+                .str.replace(",", ".", regex=False)
+                .str.extract(r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", expand=False),  # yalnız rəqəm hissəni götür
+                errors="coerce"
+            ).fillna(1.0)
+            amount_col = "amount" 
+# 3) yenə də tapılmadısa, builder default = 1 istifadə edəcək (heç nə etmə)
+
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error":"NORMALIZE_ERROR","detail":str(e)})
+
+    # amount başlığını autodetect et (tapılmasa builder 1 götürəcək)
+    amount_col = _pick_col(
+        qdf.columns,
+        "amount","miqdar","say","qty","quantity","koliçestvo","количество","кол-во"
+    )
+
+    # 3) Master (DB-dən)
+    try:
+        master_df = load_master_from_db()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error":"DB_LOAD_ERROR","detail":str(e)})
+
+    # 4) Sətir-sətir match (DÜZGÜN API: azcon_match.api.find_matches)
+    #    NOTE: bu funksiya q_text, q_flag, q_unit, master_df alır və “priced_hits” qaytarır
+    try:
+        matches = []
+        for q_text, q_flag, q_unit in qdf[[CFG.QUERY_TEXT_COL, CFG.QUERY_FLAG_COL, CFG.UNIT_COL]].itertuples(index=False, name=None):
+            res = find_matches(q_text, q_flag, q_unit, master_df)  # <- düzgün imza
+            hits = res.get("priced_hits") or res.get("hits") or []
+            matches.append(hits)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error":"MATCH_ERROR","detail":str(e)})
+
+    # 5) V2 çıxışı (sənin istədiyin kolonlar + altda cəmlər)
+    try:
+        out_df = build_output_df_v2(
+            qdf=qdf,
+            matches=matches,
+            text_col=CFG.QUERY_TEXT_COL,
+            amount_col=amount_col,
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error":"OUTPUT_BUILD_ERROR","detail":str(e)})
+
+    # # 6) strict rejim: price boş olan sətirlər varsa 422 (cəmlər sətrini saymırıq)
+    # if strict and len(out_df) > 0:
+    #     body_df = out_df.iloc[:-1]
+    #     missing_rows = body_df[body_df["price"].isna()]
+    #     if len(missing_rows) > 0:
+    #         xls_bytes = build_excel_bytes_v2(out_df, sheet_name="ResultV2")
+    #         return JSONResponse(
+    #             status_code=422,
+    #             content={
+    #                 "error": "EMPTY_PRICE_ROWS",
+    #                 "rows": [int(i) + 2 for i in missing_rows.index.tolist()],
+    #                 "message": "Bəzi sətirlər üçün uyğun qiymət tapılmadı"
+    #             }
+    #         )
+
+
+
+
+#     # 6) strict rejim: price boş olan sətirlər olsa belə FAYLI qaytar,
+# #    sətir nömrələrini isə HEADERS-də ver
+#     if len(out_df) > 0:
+#         body_df = out_df.iloc[:-1]  # son sətr cəmdir
+#         missing_rows = body_df[body_df["price"].isna()]
+#         excel_rows = [int(i) + 2 for i in missing_rows.index.tolist()]  # Excel sətir nömrələri
+#     else:
+#         excel_rows = []
+
+#     # Faylı HƏMİŞƏ hazırla (boş qiymət olsa da)
+#     xls_bytes = build_excel_bytes_v2(out_df, sheet_name="ResultV2")
+
+#     # Header-ları qur ( varsa, error info əlavə et )
+#     headers = {
+#         "Content-Disposition": 'attachment; filename="estimate_result_v2.xlsx"',
+
+#     }
+#     if excel_rows:
+#         headers["X-Error"] = "EMPTY_PRICE_ROWS"
+#         headers["X-Empty-Price-Rows"] = ",".join(str(n) for n in excel_rows)
+
+#     return StreamingResponse(
+#         io.BytesIO(xls_bytes),
+#         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+#         headers=headers,
+#         status_code=200
+#     )
+
+# 6) HƏMİŞƏ faylı qaytar; əgər boş qiymət VARSA -> rows header-larda,
+#    əgər boş qiymət YOXDURSA -> başlıqsız ilk 10 sətir JSON-u da header-da ver
+
+    if len(out_df) > 0:
+        body_df = out_df.iloc[:-1]  # son sətr cəmdir
+    else:
+        body_df = out_df
+
+    missing_rows = body_df[body_df["price"].isna()]
+    excel_rows = [int(i) + 2 for i in missing_rows.index.tolist()]  # Excel sətir nömrələri
+
+    # Faylı HƏMİŞƏ hazırla (boş qiymət olsa da)
+    xls_bytes = build_excel_bytes_v2(out_df, sheet_name="ResultV2")
+
+    headers = {
+        "Content-Disposition": 'attachment; filename="estimate_result_v2.xlsx"'
+    }
+
+    if excel_rows:
+        # Boş qiymət VAR -> yalnız error info header-larda
+        headers["X-Error"] = "EMPTY_PRICE_ROWS"
+        headers["X-Empty-Price-Rows"] = ",".join(str(n) for n in excel_rows)
+    else:
+        # Boş qiymət YOX -> başlıqsız ilk 10 sətri JSON kimi header-da ver
+# Boş qiymət YOX -> başlıqlı (dict) JSON kimi ilk 10 sətri header-da ver
+        cols = ["ad", "amount", "unit", "price", "total_price", "total_with_edv"]
+        top = body_df[cols].head(10).copy().where(lambda df: df.notna(), None)
+
+        import json
+        top10_records = top.to_dict(orient="records")
+
+        # BURA DƏYİŞDİ: URL-encode YOX, düz JSON (ASCII-safe) yazırıq
+        # headers["X-Top10"] = json.dumps(top10_records, ensure_ascii=True, separators=(",", ":"))
+        def build_top10_json_ascii(out_df: pd.DataFrame,
+                            cols=("ad","amount","unit","price","total_price","total_with_edv")
+                            ) -> str:
+            """
+            out_df: sənin build_output_df_v2 nəticən (son sətr cəmdir, varsa atılır)
+            cols: çıxışda istədiyin sütunlar; mövcud olmayanları avtomatik atır
+
+            Qaytarır: JSON string (records list)
+            """
+            if out_df is None or len(out_df) == 0:
+                payload = []
+            else:
+                body_df = out_df.iloc[:-1] if len(out_df) > 0 else out_df
+                use_cols = [c for c in cols if c in body_df.columns]
+                top = body_df[use_cols].head(10).copy()
+                top = top.where(pd.notna(top), None)
+                payload = top.to_dict(orient="records")
+
+            json_str = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+            # Konsola (server log-a) çap elə
+            print("TOP10_JSON:", json_str)
+            return json_str
+        headers["X-Top10-Format"] = "records"
+        top10_json = build_top10_json_ascii(out_df)
+        headers["X-Top10"] = top10_json
+        headers["X-Top10-Count"] = str(len(json.loads(top10_json)))
+
+        top10_json = build_top10_json_ascii(out_df)
+        headers["X-Top10"] = top10_json
+
+    
+    # 7) Excel qayt
+    try:
+        xls_bytes = build_excel_bytes_v2(out_df, sheet_name="ResultV2")
+        return StreamingResponse(
+            io.BytesIO(xls_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers,
+            status_code=200
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error":"EXCEL_BUILD_ERROR","detail":str(e)})
 
 @app.post("/estimates/process")
 def process_from_url(payload: Dict[str, Any] = Body(...)):
