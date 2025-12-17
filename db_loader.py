@@ -345,6 +345,9 @@ from __future__ import annotations
 import os
 import pandas as pd
 from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
+
+load_dotenv()  # Ensure .env is loaded
 
 from azcon_match import config as CFG, preprocessing as pp
 from azcon_match.data_loader import normalize_flag, normalize_unit

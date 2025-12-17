@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  azcon_match_svc:
+    image: ghcr.io/aliyeffali7/azcon_match_svc:latest
+    container_name: azcon_match_svc
+    ports:
+      - "8000:8000"
+    environment:
+      - MASTER_DB_URL=mysql+pymysql://azconprice_user:azconprice_pass@azconprice_db:3306/azconprice_db?charset=utf8mb4
+      - MASTER_TABLE=calculating
+      - TOP_N=5
+      - THRESHOLD=60
+    networks:
+      - dev_azconadmin-network
+    restart: unless-stopped
+
+networks:
+  dev_azconadmin-network:
+    external: true
+
