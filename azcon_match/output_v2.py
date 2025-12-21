@@ -3,7 +3,7 @@ import io
 from typing import List, Dict, Any, Optional
 import pandas as pd
 
-V2_COLS = ["ad", "amount", "unit", "price", "total_price", "total_with_edv"]
+V2_COLS = ["ad", "miqdar", "vahid", "məbləğ", "ümumi məbləğ", "ƏDV-li məbləğ"]
 
 def _to_float(x) -> Optional[float]:
     try:
@@ -68,22 +68,22 @@ def build_output_df_v2(
 
         rows.append({
             "ad": q_text,
-            "amount": amount,
-            "unit": unit,
-            "price": mean_price,
-            "total_price": total_price,
-            "total_with_edv": total_with_edv,
+            "miqdar": amount,
+            "vahid": unit,
+            "məbləğ": mean_price,
+            "ümumi məbləğ": total_price,
+            "ƏDV-li məbləğ": total_with_edv,
         })
 
     df = pd.DataFrame(rows, columns=V2_COLS)
 
     # Alt cəm sətri (ədədi)
-    sum_total = float(df["total_price"].fillna(0).sum())
-    sum_total_vat = float(df["total_with_edv"].fillna(0).sum())
+    sum_total = float(df["ümumi məbləğ"].fillna(0).sum())
+    sum_total_vat = float(df["ƏDV-li məbləğ"].fillna(0).sum())
     total_row = {
-        "ad": "", "amount": "", "unit": "", "price": "",
-        "total_price": round(sum_total, 4),
-        "total_with_edv": round(sum_total_vat, 4),
+        "ad": "", "miqdar": "", "vahid": "", "məbləğ": "",
+        "ümumi məbləğ": round(sum_total, 4),
+        "ƏDV-li məbləğ": round(sum_total_vat, 4),
     }
     df = pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
     return df

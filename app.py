@@ -666,7 +666,7 @@ async def upload_estimate_v2(
     else:
         body_df = out_df
 
-    missing_rows = body_df[body_df["price"].isna()]
+    missing_rows = body_df[body_df["məbləğ"].isna()]
     excel_rows = [int(i) + 2 for i in missing_rows.index.tolist()]  # Excel sətir nömrələri
 
     # Faylı HƏMİŞƏ hazırla (boş qiymət olsa da)
@@ -683,7 +683,7 @@ async def upload_estimate_v2(
     else:
         # Boş qiymət YOX -> başlıqsız ilk 10 sətri JSON kimi header-da ver
 # Boş qiymət YOX -> başlıqlı (dict) JSON kimi ilk 10 sətri header-da ver
-        cols = ["ad", "amount", "unit", "price", "total_price", "total_with_edv"]
+        cols = ["ad", "miqdar", "vahid", "məbləğ", "ümumi məbləğ", "ƏDV-li məbləğ"]
         top = body_df[cols].head(10).copy().where(lambda df: df.notna(), None)
 
         import json
@@ -692,7 +692,7 @@ async def upload_estimate_v2(
         # BURA DƏYİŞDİ: URL-encode YOX, düz JSON (ASCII-safe) yazırıq
         # headers["X-Top10"] = json.dumps(top10_records, ensure_ascii=True, separators=(",", ":"))
         def build_top10_json_ascii(out_df: pd.DataFrame,
-                            cols=("ad","amount","unit","price","total_price","total_with_edv")
+                            cols=("ad","miqdar","vahid","məbləğ","ümumi məbləğ","ƏDV-li məbləğ")
                             ) -> str:
             """
             out_df: sənin build_output_df_v2 nəticən (son sətr cəmdir, varsa atılır)
